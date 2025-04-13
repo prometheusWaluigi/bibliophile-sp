@@ -1,0 +1,40 @@
+[tool.poetry]
+name = "bibliophile-sp"
+version = "0.1.0"
+description = "SP-API powered inventory sync and analysis tool"
+authors = ["Ketan Raturi <ketan@aeonic.dev>"]
+readme = "README.md"
+license = "MIT"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+requests = "^2.31"
+python-dotenv = "^1.0.0"
+pandas = "^2.2.2"
+numpy = "^1.26.4"
+scikit-learn = "^1.5.1"
+matplotlib = "^3.9.2"
+daal4py = "^2023.2.0"  # Intel oneAPI Data Analytics Library
+scikit-learn-intelex = "^2023.2.0"  # Intel Extension for Scikit-learn
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^23.7.0"
+isort = "^5.12.0"
+flake8 = "^6.1.0"
+
+[tool.poetry.scripts]
+bibliophile-sp = "src.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88

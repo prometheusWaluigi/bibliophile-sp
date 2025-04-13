@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # Default service using Intel oneAPI acceleration
+  bibiliophile-sp:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: bibiliophile-sp
+    volumes:
+      - ./output:/app/output
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: poetry run python src/cli.py
+    # Uncomment to use SP-API with real data
+    # command: poetry run python src/cli.py --use-spapi
+  
+  # macOS optimized version (without Intel oneAPI dependencies)
+  mac:
+    build:
+      context: .
+      dockerfile: Dockerfile.mac
+    container_name: bibiliophile-sp-mac
+    volumes:
+      - ./output:/app/output
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: poetry run python src/cli.py
+    # Uncomment to use SP-API with real data
+    # command: poetry run python src/cli.py --use-spapi
+    profiles:
+      - mac
+
+# To run the macOS optimized version:
+# docker-compose --profile mac up
