@@ -10,10 +10,12 @@ try:
     # Try relative import (when used as a package)
     from .main import run_inventory_analysis
     from .oneapi_accelerator import ONEAPI_AVAILABLE, APPLE_ACCELERATE_AVAILABLE, ACCELERATION_AVAILABLE, IS_MAC, IS_ARM_MAC
+    from .sp_data_analysis import run_sp_data_analysis
 except ImportError:
     # Try absolute import (when run directly)
     from main import run_inventory_analysis
     from oneapi_accelerator import ONEAPI_AVAILABLE, APPLE_ACCELERATE_AVAILABLE, ACCELERATION_AVAILABLE, IS_MAC, IS_ARM_MAC
+    from sp_data_analysis import run_sp_data_analysis
 try:
     # Try relative import (when used as a package)
     from .visualization import visualize_results
@@ -29,23 +31,74 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    parser.add_argument(
+    # Create subparsers for different commands
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
+    
+    # Standard inventory analysis command
+    inventory_parser = subparsers.add_parser(
+        'inventory', 
+        help='Run standard inventory analysis with optional SP-API integration'
+    )
+    inventory_parser.add_argument(
         "--use-spapi",
         action="store_true",
         help="Use SP-API to fetch real data (requires valid credentials)"
     )
+    inventory_parser.add_argument(
+        "--no-visualize",
+        action="store_true",
+        help="Skip visualization generation"
+    )
+    inventory_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="output",
+        help="Directory to save output files"
+    )
     
+    # SP data analysis command
+    sp_data_parser = subparsers.add_parser(
+        'sp-data', 
+        help='Analyze extracted SP-API report data files'
+    )
+    sp_data_parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="data",
+        help="Directory containing SP-API data files (default: data)"
+    )
+    sp_data_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="output",
+        help="Directory to save analysis results (default: output)"
+    )
+    sp_data_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+    
+    # Common argument for output directory (used when no subcommand is specified)
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="output",
+        help="Directory to save output files"
+    )
+    
+    # Common argument for visualization (used when no subcommand is specified)
     parser.add_argument(
         "--no-visualize",
         action="store_true",
         help="Skip visualization generation"
     )
     
+    # Common argument for SP-API (used when no subcommand is specified)
     parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="output",
-        help="Directory to save output files"
+        "--use-spapi",
+        action="store_true",
+        help="Use SP-API to fetch real data (requires valid credentials)"
     )
     
     # Acceleration options
@@ -94,17 +147,6 @@ def parse_args():
 def main():
     """Main entry point for the CLI."""
     args = parse_args()
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Run the analysis
-    print(f"🚀 Starting BibliophileSP analysis...")
-    
-    if args.use_spapi:
-        print("📡 Using SP-API to fetch real data...")
-    else:
-        print("🧪 Using dummy data (sandbox mode)...")
     
     # Show platform information
     if IS_MAC:
@@ -161,6 +203,30 @@ def main():
     else:
         print("ℹ️ No acceleration available. Using standard implementations.")
     
+    # Determine which command to run
+    if hasattr(args, 'command') and args.command == 'sp-data':
+        return run_sp_data_command(args, use_acceleration)
+    elif hasattr(args, 'command') and args.command == 'inventory':
+        return run_inventory_command(args, use_acceleration)
+    else:
+        # Default to inventory analysis for backward compatibility
+        print("No command specified, defaulting to standard inventory analysis.")
+        return run_inventory_command(args, use_acceleration)
+
+
+def run_inventory_command(args, use_acceleration):
+    """Run the standard inventory analysis command."""
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Run the analysis
+    print(f"🚀 Starting BibliophileSP inventory analysis...")
+    
+    if args.use_spapi:
+        print("📡 Using SP-API to fetch real data...")
+    else:
+        print("🧪 Using dummy data (sandbox mode)...")
+    
     try:
         # Run the analysis
         results_df = run_inventory_analysis(
@@ -187,6 +253,70 @@ def main():
         return 0
     except Exception as e:
         print(f"❌ Error: {str(e)}")
+        return 1
+
+
+def run_sp_data_command(args, use_acceleration):
+    """Run the SP data analysis command."""
+    # Validate the data directory
+    if not os.path.exists(args.data_dir):
+        print(f"❌ Data directory '{args.data_dir}' does not exist")
+        return 1
+    
+    data_files = [f for f in os.listdir(args.data_dir) if os.path.isfile(os.path.join(args.data_dir, f))]
+    if not data_files:
+        print(f"❌ No files found in data directory '{args.data_dir}'")
+        return 1
+    
+    print(f"🚀 Starting SP-API data analysis on {len(data_files)} files...")
+    print(f"📂 Data directory: {args.data_dir}")
+    print(f"📊 Output directory: {args.output_dir}")
+    
+    try:
+        # Run the SP data analysis
+        results = run_sp_data_analysis(
+            data_dir=args.data_dir,
+            output_dir=args.output_dir,
+            use_acceleration=use_acceleration
+        )
+        
+        print("\n✨ SP data analysis complete! ✨")
+        
+        # Summarize results
+        if results.get("basic_analysis") is not None:
+            n_records = len(results["basic_analysis"])
+            print(f"📊 Analyzed {n_records} inventory items")
+            
+            # Count flagged items
+            if "Flag" in results["basic_analysis"].columns:
+                flagged = results["basic_analysis"]["Flag"].value_counts().get("⚠️", 0)
+                if flagged > 0:
+                    print(f"⚠️ Found {flagged} items requiring attention ({flagged/n_records:.1%})")
+        
+        if results.get("clustering") is not None:
+            clusters = results["clustering"]["Cluster"].nunique()
+            print(f"🔍 Identified {clusters} distinct inventory clusters")
+        
+        print(f"📊 Results saved to {args.output_dir}/")
+        
+        # List output files
+        output_files = [f for f in os.listdir(args.output_dir) if os.path.isfile(os.path.join(args.output_dir, f)) and f.endswith(".csv")]
+        for file in output_files:
+            print(f"  - {file}")
+        
+        # Check for visualizations
+        viz_dir = os.path.join(args.output_dir, "visualizations")
+        if os.path.exists(viz_dir):
+            viz_files = [f for f in os.listdir(viz_dir) if os.path.isfile(os.path.join(viz_dir, f)) and f.endswith(".png")]
+            if viz_files:
+                print(f"📈 {len(viz_files)} visualizations generated in {viz_dir}/")
+        
+        return 0
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        if hasattr(args, 'verbose') and args.verbose:
+            import traceback
+            traceback.print_exc()
         return 1
 
 

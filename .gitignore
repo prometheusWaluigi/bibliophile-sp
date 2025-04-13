@@ -59,3 +59,9 @@ output/
 *.jpeg
 *.pdf
 *.log
+*.xlsx
+*.txt
+
+# Data files but keep the zip files for reproducibility
+data/*
+!data/*.zip
