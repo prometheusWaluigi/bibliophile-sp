@@ -26,7 +26,7 @@ ENV MKLROOT=/opt/intel/oneapi/mkl/latest
 # Copy dependency definition first for better caching
 COPY pyproject.toml poetry.lock* ./
 RUN poetry config virtualenvs.create false && \
-    poetry install --no-dev --no-interaction --no-ansi
+    poetry install --only=main --no-interaction --no-ansi
 
 # Copy project files
 COPY . .

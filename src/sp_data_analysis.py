@@ -12,8 +12,8 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from .analysis import InventoryAnalyzer
-from .oneapi_accelerator import AccelerationContext, ONEAPI_AVAILABLE, accelerated_kmeans
+from analysis import InventoryAnalyzer
+from oneapi_accelerator import AccelerationContext, ONEAPI_AVAILABLE, accelerated_kmeans
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -50,8 +50,9 @@ class SPDataLoader:
         Returns:
             self: For method chaining
         """
-        self.load_sales_data()
+        # Load inventory data first since sales data needs it for SKU mapping
         self.load_inventory_data()
+        self.load_sales_data()
         self.load_performance_data()
         return self
     
@@ -62,29 +63,55 @@ class SPDataLoader:
         Returns:
             pd.DataFrame: Processed sales data
         """
-        # Try to load from SalesandTrafficByDate.csv first
-        sales_file = self.data_dir / "SalesandTrafficByDate.csv"
+        # Try to load from cleaned sales data first
+        sales_file = self.data_dir / "cleaned/cleaned_SalesandTrafficByDate.csv"
         
         if sales_file.exists():
             logger.info(f"Loading sales data from {sales_file}")
-            sales_df = pd.read_csv(sales_file)
+            # Read with fixed column names
+            column_names = [
+                'Date', 'Ordered Product Sales', 'Ordered Product Sales - B2B',
+                'Units Ordered', 'Units Ordered - B2B', 'Total Order Items',
+                'Total Order Items - B2B', 'Average Sales per Order Item',
+                'Average Sales per Order Item - B2B', 'Average Units per Order Item',
+                'Average Units per Order Item - B2B', 'Average Selling Price',
+                'Average Selling Price - B2B', 'Sessions - Total', 'Sessions - Total - B2B',
+                'Order Item Session Percentage', 'Order Item Session Percentage - B2B',
+                'Average Offer Count'
+            ]
+            
+            # Read data with proper delimiter and handle quoted values
+            sales_df = pd.read_csv(sales_file, names=column_names, skiprows=1, 
+                                 encoding='utf-8', quoting=3)  # QUOTE_NONE
             
             # Process the sales data
             if "Date" in sales_df.columns:
                 sales_df["Date"] = pd.to_datetime(sales_df["Date"])
             
-            # Map to standard columns expected by InventoryAnalyzer
-            column_mapping = {
-                "Date": "Date",
-                "OrderedProductSales": "Sales",
-                "OrderedUnits": "Quantity",
-                "ASIN": "SKU"  # Assuming ASIN can be used as SKU for analysis
-            }
+            # Map sales data columns with proper column names and types
+            sales_df['OrderedProductSales'] = pd.to_numeric(sales_df['Ordered Product Sales'].astype(str).str.replace('"', ''), errors='coerce')
+            sales_df['Sales'] = sales_df['OrderedProductSales']  # Map directly to Sales
+            sales_df['Quantity'] = pd.to_numeric(sales_df['Units Ordered'].astype(str).str.replace('"', ''), errors='coerce').fillna(0).clip(lower=0)
+            sales_df['quantity'] = sales_df['Quantity']  # Add lowercase version for analysis
             
-            # Rename columns if they exist
-            for old_col, new_col in column_mapping.items():
-                if old_col in sales_df.columns and old_col != new_col:
-                    sales_df[new_col] = sales_df[old_col]
+            # Handle Date column
+            if 'Date' in sales_df.columns:
+                sales_df['Date'] = pd.to_datetime(sales_df['Date'])
+            else:
+                sales_df['Date'] = pd.Timestamp.now()
+            
+            # Create unique SKU for each row with timestamp
+            sales_df['SKU'] = sales_df.apply(lambda row: f"SALE_{pd.Timestamp(row['Date']).strftime('%Y%m%d')}_{row.name}", axis=1)
+            
+            # Ensure required columns exist with proper values
+            required_cols = {'Date', 'SKU', 'quantity', 'Sales'}
+            for col in required_cols:
+                if col not in sales_df.columns:
+                    sales_df[col] = 0 if col in ['quantity', 'Sales'] else None
+            
+            # Fill NaN values
+            sales_df['Quantity'] = sales_df['Quantity'].fillna(0)
+            sales_df['Sales'] = sales_df['Sales'].fillna(0)
             
             self.sales_data = sales_df
             logger.info(f"Loaded {len(sales_df)} sales records")
@@ -111,7 +138,7 @@ class SPDataLoader:
         if self.sales_data is None:
             logger.warning("No sales data files found. Analysis will be limited.")
             # Create empty DataFrame with expected columns
-            self.sales_data = pd.DataFrame(columns=["Date", "SKU", "Quantity", "Sales"])
+            self.sales_data = pd.DataFrame(columns=["Date", "SKU", "quantity", "Sales"])
         
         return self.sales_data
     
@@ -122,11 +149,11 @@ class SPDataLoader:
         Returns:
             pd.DataFrame: Processed inventory data
         """
-        # Try to load from inventory report files
+        # Try to load from cleaned inventory report files
         inventory_files = [
-            "Inventory+Report+03-22-2025.txt",
-            "Open+Listings+Report+03-22-2025.txt",
-            "All+Listings+Report+03-22-2025.txt"
+            "cleaned/cleaned_Inventory+Report+03-22-2025.txt",
+            "cleaned/cleaned_Open+Listings+Report+03-22-2025.txt",
+            "cleaned/cleaned_All+Listings+Report+03-22-2025.txt"
         ]
         
         for file_name in inventory_files:
@@ -134,39 +161,104 @@ class SPDataLoader:
             if file_path.exists():
                 logger.info(f"Loading inventory data from {file_path}")
                 
-                # For tab-delimited text files
                 try:
-                    inventory_df = pd.read_csv(file_path, sep='\t', encoding='utf-8')
+                    # Read data with fixed column names
+                    chunks = []
+                    for chunk in pd.read_csv(file_path, sep='\t', encoding='utf-8', chunksize=10000, 
+                                           header=0,  # Use first row as header
+                                           dtype={
+                                               'SKU': str,
+                                               'asin': str,
+                                               'Price': float,
+                                               'Quantity': float
+                                           }):
+                        # Convert numeric columns immediately and map to standard names
+                        chunk['Price'] = pd.to_numeric(chunk['Price'], errors='coerce')
+                        chunk['quantity'] = pd.to_numeric(chunk['Quantity'], errors='coerce').fillna(0).clip(lower=0)
+                        chunk['SKU'] = chunk['SKU'].astype(str)
+                        chunk['ASIN'] = chunk['asin']
+                        
+                        chunks.append(chunk)
+                    inventory_df = pd.concat(chunks, ignore_index=True)
+                    
+                    # Convert numeric columns and ensure proper data types
+                    inventory_df['Price'] = pd.to_numeric(inventory_df['Price'], errors='coerce')
+                    inventory_df['SKU'] = inventory_df['SKU'].astype(str)
                     
                     # Map columns to standard format expected by analysis
-                    if "seller-sku" in inventory_df.columns:
-                        inventory_df["SKU"] = inventory_df["seller-sku"]
-                    elif "sku" in inventory_df.columns:
-                        inventory_df["SKU"] = inventory_df["sku"]
+                    column_mappings = {
+                        'seller-sku': 'SKU',
+                        'sku': 'SKU',
+                        'asin1': 'ASIN',
+                        'item-name': 'Title',
+                        'item_name': 'Title',
+                        'item-description': 'Title',
+                        'product-name': 'Title',
+                        'name': 'Title',
+                        'title': 'Title',
+                        'price': 'Price',
+                        'price-amount': 'Price',
+                        'quantity': 'quantity',
+                        'quantity-available': 'quantity',
+                        'condition': 'Condition',
+                        'fulfillment-channel': 'FulfillmentChannel',
+                        'open-date': 'OpenDate'
+                    }
                     
-                    if "asin1" in inventory_df.columns:
-                        inventory_df["ASIN"] = inventory_df["asin1"]
+                    # Ensure Title column exists
+                    if 'Title' not in inventory_df.columns:
+                        # Try to find any column containing product names
+                        title_cols = [col for col in inventory_df.columns if any(x in col.lower() for x in ['name', 'title', 'description'])]
+                        if title_cols:
+                            inventory_df['Title'] = inventory_df[title_cols[0]]
+                        else:
+                            inventory_df['Title'] = 'Unknown Title'
                     
-                    if "item-name" in inventory_df.columns:
-                        inventory_df["Title"] = inventory_df["item-name"]
-                    elif "item_name" in inventory_df.columns:
-                        inventory_df["Title"] = inventory_df["item_name"]
+                    # Apply mappings for columns that exist
+                    for old_col, new_col in column_mappings.items():
+                        if old_col in inventory_df.columns:
+                            inventory_df[new_col] = inventory_df[old_col]
                     
-                    if "price" in inventory_df.columns:
-                        inventory_df["Price"] = pd.to_numeric(inventory_df["price"], errors="coerce")
+                    # Ensure required columns exist and are properly formatted
+                    required_cols = {'SKU', 'ASIN', 'Price', 'quantity'}
+                    for col in required_cols:
+                        if col not in inventory_df.columns:
+                            # Try to find matching column with different case
+                            matching_cols = [c for c in inventory_df.columns if c.lower() == col.lower()]
+                            if matching_cols:
+                                inventory_df[col] = inventory_df[matching_cols[0]]
+                            else:
+                                inventory_df[col] = 0 if col in ['Price', 'quantity'] else ''
+                    
+                    # Convert numeric columns
+                    inventory_df['Price'] = pd.to_numeric(inventory_df['Price'], errors='coerce').fillna(0)
+                            
+                    # Ensure SKU column exists
+                    if 'SKU' not in inventory_df.columns and 'ASIN' in inventory_df.columns:
+                        inventory_df['SKU'] = inventory_df['ASIN']
+                    
+                    # Convert price to numeric if it exists
+                    if 'Price' in inventory_df.columns:
+                        inventory_df['Price'] = pd.to_numeric(inventory_df['Price'], errors='coerce')
                     
                     # Check for image availability
                     if "has_image" in inventory_df.columns:
                         inventory_df["Has_Image"] = inventory_df["has_image"].astype(bool)
                     elif "main-image-url" in inventory_df.columns:
                         inventory_df["Has_Image"] = ~inventory_df["main-image-url"].isna()
+                    else:
+                        inventory_df["Has_Image"] = False
                     
                     # Check for ISBN
                     isbn_cols = ["isbn", "external_product_id", "product-id"]
+                    found_isbn = False
                     for col in isbn_cols:
                         if col in inventory_df.columns:
                             inventory_df["ISBN"] = inventory_df[col]
+                            found_isbn = True
                             break
+                    if not found_isbn:
+                        inventory_df["ISBN"] = ""
                     
                     self.inventory_data = inventory_df
                     logger.info(f"Loaded {len(inventory_df)} inventory records")
@@ -178,7 +270,7 @@ class SPDataLoader:
         if self.inventory_data is None:
             logger.warning("No inventory data files found. Analysis will be limited.")
             # Create empty DataFrame with expected columns
-            self.inventory_data = pd.DataFrame(columns=["SKU", "Title", "Price", "Has_Image", "ISBN"])
+            self.inventory_data = pd.DataFrame(columns=["SKU", "Title", "Price", "Has_Image", "ISBN", "quantity"])
         
         return self.inventory_data
     
@@ -189,11 +281,11 @@ class SPDataLoader:
         Returns:
             pd.DataFrame: Processed performance data
         """
-        # Try different performance files
+        # Try different cleaned performance files
         performance_files = [
-            "SellerPerformance.csv",
-            "UnitOnTimeDelivery_1282029020169.csv",
-            "OrderDefects_1282032020169.csv"
+            "cleaned/cleaned_SellerPerformance.csv",
+            "cleaned/cleaned_UnitOnTimeDelivery_1282029020169.csv",
+            "cleaned/cleaned_OrderDefects_1282032020169.csv"
         ]
         
         for file_name in performance_files:
@@ -278,10 +370,103 @@ class SPDataAnalyzer:
                 basic_analysis = self.inventory_analyzer.analyze()
                 results["basic_analysis"] = basic_analysis
                 
-                # Save results
-                output_path = self.data_loader.output_dir / "inventory_analysis.csv"
-                basic_analysis.to_csv(output_path, index=False)
-                logger.info(f"Saved basic analysis to {output_path}")
+                # Create timestamped output directory
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_dir = self.data_loader.output_dir / f"analysis_{timestamp}"
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Save main analysis with proper column separation
+                main_output = output_dir / "inventory_analysis.csv"
+                # Update column references for filtering
+                days_since_last_sale = 'Days Since Last Sale'
+                sales_last_90d = 'Sales Last 90d'
+                sales_last_30d = 'Sales Last 30d'
+                
+                # Rename columns to ensure proper spacing
+                basic_analysis.columns = [col.replace(' ', '_') for col in basic_analysis.columns]
+                # Add spaces between columns for CSV output
+                basic_analysis.columns = [','.join(col.split('_')) for col in basic_analysis.columns]
+                
+                # Save main analysis
+                basic_analysis.to_csv(main_output, index=False, sep=',')
+                
+                # Save detailed reports with proper filtering
+                # Stale detection criteria from README
+                stale_items = basic_analysis[
+                    (basic_analysis[days_since_last_sale] > 120) |  # No sales in 4 months
+                    ((basic_analysis[sales_last_90d] == 0) & (basic_analysis['quantity'] > 0)) |  # Stock but no recent sales
+                    (basic_analysis[sales_last_90d] * 4 < 3)  # Less than 3 sales per year
+                ].copy()
+                stale_items.to_csv(output_dir / "stale_items.csv", index=False, sep=',')
+                logger.info(f"Found {len(stale_items)} stale items")
+                
+                # Bad metadata criteria from README
+                bad_metadata = basic_analysis[
+                    (basic_analysis['Title'].str.len() < 5) |  # Title too short
+                    (basic_analysis['ISBN'].isna() | (basic_analysis['ISBN'] == '')) |  # No ISBN
+                    (~basic_analysis['Has_Image']) |  # No cover image
+                    (basic_analysis['Price'] < 2.0)  # Price too low
+                ].copy()
+                bad_metadata.to_csv(output_dir / "bad_metadata.csv", index=False, sep=',')
+                logger.info(f"Found {len(bad_metadata)} items with bad metadata")
+                
+                good_sellers = basic_analysis[
+                    (basic_analysis[sales_last_30d] > 0) &  # Recent sales
+                    (basic_analysis[days_since_last_sale] <= 30) &  # Active in last month
+                    (basic_analysis['Title'].notna()) &  # Has proper metadata
+                    (basic_analysis['Title'] != '') &
+                    (basic_analysis['Title'] != 'Unknown Title') &
+                    (basic_analysis['Has_Image']) &  # Has image
+                    (basic_analysis['quantity'] > 0)  # In stock
+                ].copy()
+                good_sellers.to_csv(output_dir / "good_sellers.csv", index=False, sep=',')
+                logger.info(f"Found {len(good_sellers)} good sellers")
+                
+                sales_velocity = basic_analysis[
+                    ['SKU', 'Title', sales_last_30d, sales_last_90d, days_since_last_sale]
+                ].sort_values(sales_last_90d, ascending=False)
+                sales_velocity.to_csv(output_dir / "sales_velocity.csv", index=False, sep=',')
+                
+                # Calculate heuristic score (0-1) based on README criteria
+                basic_analysis['Heuristic_Score'] = 1.0
+                # Deduct for stale items
+                basic_analysis.loc[basic_analysis[days_since_last_sale] > 120, 'Heuristic_Score'] -= 0.25
+                basic_analysis.loc[basic_analysis[sales_last_90d] * 4 < 3, 'Heuristic_Score'] -= 0.25
+                # Deduct for bad metadata
+                basic_analysis.loc[basic_analysis['Title'].str.len() < 5, 'Heuristic_Score'] -= 0.125
+                basic_analysis.loc[basic_analysis['ISBN'].isna() | (basic_analysis['ISBN'] == ''), 'Heuristic_Score'] -= 0.125
+                basic_analysis.loc[~basic_analysis['Has_Image'], 'Heuristic_Score'] -= 0.125
+                basic_analysis.loc[basic_analysis['Price'] < 2.0, 'Heuristic_Score'] -= 0.125
+                # Ensure score stays within 0-1 range
+                basic_analysis['Heuristic_Score'] = basic_analysis['Heuristic_Score'].clip(0, 1)
+                
+                # Save metadata quality analysis
+                metadata_quality = basic_analysis[
+                    ['SKU', 'Title', 'ISBN', 'Has_Image', 'Price', 'Heuristic_Score']
+                ].sort_values('Heuristic_Score', ascending=False)
+                metadata_quality.to_csv(output_dir / "metadata_quality.csv", index=False, sep=',')
+                
+                revenue_last_30d = 'Revenue_Last_30d'
+                revenue_last_90d = 'Revenue_Last_90d'
+                
+                if revenue_last_30d in basic_analysis.columns:
+                    revenue_analysis = basic_analysis[
+                        ['SKU', 'Title', revenue_last_30d, revenue_last_90d, 
+                         sales_last_30d, sales_last_90d]
+                    ].sort_values(revenue_last_90d, ascending=False)
+                    revenue_analysis.to_csv(output_dir / "revenue_analysis.csv", index=False, sep=',')
+                
+                logger.info(f"\nAnalysis complete. Results written to {output_dir}/")
+                logger.info("\nDetailed reports generated:")
+                logger.info(f"📊 Main Analysis: {main_output}")
+                logger.info(f"⚠️ Stale Items: {output_dir}/stale_items.csv")
+                logger.info(f"🔍 Bad Metadata: {output_dir}/bad_metadata.csv")
+                logger.info(f"✨ Good Sellers: {output_dir}/good_sellers.csv")
+                logger.info(f"📈 Sales Velocity: {output_dir}/sales_velocity.csv")
+                if 'Metadata_Quality_Score' in basic_analysis.columns:
+                    logger.info(f"📝 Metadata Quality: {output_dir}/metadata_quality.csv")
+                if revenue_last_30d in basic_analysis.columns:
+                    logger.info(f"💰 Revenue Analysis: {output_dir}/revenue_analysis.csv")
             except Exception as e:
                 logger.error(f"Error in basic analysis: {str(e)}")
         else:
@@ -304,7 +489,7 @@ class SPDataAnalyzer:
                 
                 # Save results
                 output_path = self.data_loader.output_dir / "inventory_clusters.csv"
-                clustered_data.to_csv(output_path, index=False)
+                clustered_data.to_csv(output_path, index=False, sep=',')
                 logger.info(f"Saved clustering analysis to {output_path}")
                 
                 # Generate cluster visualization
@@ -323,7 +508,7 @@ class SPDataAnalyzer:
                 # Save results
                 output_path = self.data_loader.output_dir / "performance_analysis.csv"
                 if isinstance(performance_analysis, pd.DataFrame):
-                    performance_analysis.to_csv(output_path, index=False)
+                    performance_analysis.to_csv(output_path, index=False, sep=',')
                     logger.info(f"Saved performance analysis to {output_path}")
             except Exception as e:
                 logger.error(f"Error in performance analysis: {str(e)}")
@@ -343,53 +528,33 @@ class SPDataAnalyzer:
             if not os.path.exists(viz_dir):
                 os.makedirs(viz_dir)
             
-            # Extract numerical features
-            numeric_cols = ['Price', 'Sales_Last_30d', 'Days_Since_Last_Sale']
-            plot_data = clustered_data[numeric_cols + ['Cluster', 'Cluster_Description']].copy()
+            # Extract available numerical features
+            plot_data = clustered_data[['Price', 'Cluster', 'Cluster_Description']].copy()
             
             # Replace missing values
             plot_data = plot_data.fillna(0)
             
-            # Generate scatter plot of Price vs. Sales
+            # Generate price distribution by cluster
             plt.figure(figsize=(10, 6))
             for cluster in plot_data['Cluster'].unique():
                 cluster_data = plot_data[plot_data['Cluster'] == cluster]
-                plt.scatter(
-                    cluster_data['Price'], 
-                    cluster_data['Sales_Last_30d'],
+                plt.hist(
+                    cluster_data['Price'],
+                    bins=30,
+                    alpha=0.5,
                     label=f"Cluster {cluster}: {cluster_data['Cluster_Description'].iloc[0]}"
                 )
             
-            plt.title('Price vs. Sales by Cluster')
+            plt.title('Price Distribution by Cluster')
             plt.xlabel('Price ($)')
-            plt.ylabel('Sales (Last 30 Days)')
+            plt.ylabel('Number of Items')
             plt.legend()
             plt.grid(True, alpha=0.3)
             
             # Save figure
-            output_path = viz_dir / "price_vs_sales_clusters.png"
+            output_path = viz_dir / "price_distribution_clusters.png"
             plt.savefig(output_path)
             logger.info(f"Saved cluster visualization to {output_path}")
-            
-            # Generate another plot for Price vs. Days Since Last Sale
-            plt.figure(figsize=(10, 6))
-            for cluster in plot_data['Cluster'].unique():
-                cluster_data = plot_data[plot_data['Cluster'] == cluster]
-                plt.scatter(
-                    cluster_data['Price'], 
-                    cluster_data['Days_Since_Last_Sale'],
-                    label=f"Cluster {cluster}: {cluster_data['Cluster_Description'].iloc[0]}"
-                )
-            
-            plt.title('Price vs. Days Since Last Sale by Cluster')
-            plt.xlabel('Price ($)')
-            plt.ylabel('Days Since Last Sale')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            
-            # Save figure
-            output_path = viz_dir / "price_vs_recency_clusters.png"
-            plt.savefig(output_path)
             
         except Exception as e:
             logger.error(f"Error generating cluster visualization: {str(e)}")

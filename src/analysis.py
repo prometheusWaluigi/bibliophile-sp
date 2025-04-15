@@ -51,17 +51,18 @@ class InventoryAnalyzer:
                 now - pd.Timedelta(days=45),
                 now - pd.Timedelta(days=90)
             ],
-            'Quantity': [1, 2, 1, 1, 1],
+            'quantity': [1, 2, 1, 1, 1],
             'Price': [12.99, 15.99, 9.99, 7.99, 5.99]
         })
         
-        # Create dummy inventory data
+        # Create dummy inventory data with quantity
         self.inventory_data = pd.DataFrame({
             'SKU': ['B000FJS1B4', '0385472579', 'B07D6CTWPZ', 'B07CHNQLTF', '0451524934'],
             'Title': ['The Hobbit', 'Zen Mind, Beginner\'s Mind', 'Educated: A Memoir', 'Sapiens', '1984'],
             'ISBN': ['9780547928227', '9781590308493', '9780399590504', '9780062316097', '9780451524935'],
             'Price': [12.99, 15.99, 9.99, 7.99, 5.99],
-            'Has_Image': [True, True, True, False, True]
+            'Has_Image': [True, True, True, False, True],
+            'quantity': [5, 3, 2, 1, 4]
         })
         
         return self
@@ -76,26 +77,46 @@ class InventoryAnalyzer:
         if self.sales_data is None or self.inventory_data is None:
             raise ValueError("Sales and inventory data must be loaded before analysis")
         
+        # Ensure required columns exist and handle case sensitivity
+        required_sales_cols = {'Date', 'SKU', 'quantity'}
+        
+        # Convert Quantity to lowercase if it exists
+        if 'Quantity' in self.sales_data.columns:
+            self.sales_data['quantity'] = self.sales_data['Quantity']
+        
+        missing_cols = required_sales_cols - set(self.sales_data.columns)
+        if missing_cols:
+            raise ValueError(f"Sales data missing required columns: {missing_cols}")
+            
+        # Convert Quantity to lowercase in inventory data if it exists
+        if 'Quantity' in self.inventory_data.columns:
+            self.inventory_data['quantity'] = self.inventory_data['Quantity']
+
         # Merge sales and inventory data
         analysis_df = self.inventory_data.copy()
         
         # Calculate days since last sale
         now = pd.Timestamp.now()
+        
+        # Ensure Date column is datetime
+        if not pd.api.types.is_datetime64_any_dtype(self.sales_data['Date']):
+            self.sales_data['Date'] = pd.to_datetime(self.sales_data['Date'])
+            
+        # Get last sale dates
         last_sale_dates = self.sales_data.groupby('SKU')['Date'].max().reset_index()
         
-        # Calculate days since last sale for each SKU
-        days_since = []
-        for date in last_sale_dates['Date']:
-            days_since.append((now - date).days)
+        # Calculate days since last sale using apply
+        def calc_days_since(row):
+            return (now - row['Date']).days
         
-        last_sale_dates['Days_Since_Last_Sale'] = days_since
+        last_sale_dates['Days_Since_Last_Sale'] = last_sale_dates.apply(calc_days_since, axis=1)
         analysis_df = analysis_df.merge(last_sale_dates[['SKU', 'Days_Since_Last_Sale']], on='SKU', how='left')
         
         # Calculate sales in last 30 days
         thirty_days_ago = now - pd.Timedelta(days=30)
-        recent_sales = self.sales_data[self.sales_data['Date'] >= thirty_days_ago]
-        sales_30d = recent_sales.groupby('SKU')['Quantity'].sum().reset_index()
-        sales_30d.rename(columns={'Quantity': 'Sales_Last_30d'}, inplace=True)
+        recent_sales = self.sales_data[self.sales_data['Date'] >= thirty_days_ago].copy()
+        sales_30d = recent_sales.groupby('SKU')['quantity'].sum().reset_index()
+        sales_30d.rename(columns={'quantity': 'Sales_Last_30d'}, inplace=True)
         analysis_df = analysis_df.merge(sales_30d[['SKU', 'Sales_Last_30d']], on='SKU', how='left')
         
         # Fill NaN values
@@ -134,9 +155,60 @@ class InventoryAnalyzer:
         analysis_df.loc[analysis_df['Bad_Metadata'], 'Notes'] = analysis_df.loc[analysis_df['Bad_Metadata'], 'Notes'] + 'Fix metadata issues'
         analysis_df.loc[(~analysis_df['Is_Stale']) & (~analysis_df['Bad_Metadata']), 'Notes'] = 'Good seller'
         
+        # Calculate sales in last 90 days
+        ninety_days_ago = now - pd.Timedelta(days=90)
+        recent_sales_90d = self.sales_data[self.sales_data['Date'] >= ninety_days_ago]
+        sales_90d = recent_sales_90d.groupby('SKU')['quantity'].sum().reset_index()
+        sales_90d.rename(columns={'quantity': 'Sales_Last_90d'}, inplace=True)
+        analysis_df = analysis_df.merge(sales_90d[['SKU', 'Sales_Last_90d']], on='SKU', how='left')
+        analysis_df['Sales_Last_90d'] = analysis_df['Sales_Last_90d'].fillna(0)
+
+        # Calculate total revenue in last 30/90 days
+        if 'Price' in self.sales_data.columns:
+            # Calculate revenue using a new DataFrame to avoid SettingWithCopyWarning
+            recent_sales = recent_sales.assign(Revenue=lambda x: x['Price'] * x['quantity'])
+            recent_sales_90d = recent_sales_90d.assign(Revenue=lambda x: x['Price'] * x['quantity'])
+            
+            revenue_30d = recent_sales.groupby('SKU')['Revenue'].sum().reset_index()
+            revenue_90d = recent_sales_90d.groupby('SKU')['Revenue'].sum().reset_index()
+            
+            analysis_df = analysis_df.merge(revenue_30d[['SKU', 'Revenue']], on='SKU', how='left')
+            analysis_df = analysis_df.merge(revenue_90d[['SKU', 'Revenue']], on='SKU', how='left', suffixes=('_30d', '_90d'))
+            
+            analysis_df['Revenue_30d'] = analysis_df['Revenue_30d'].fillna(0)
+            analysis_df['Revenue_90d'] = analysis_df['Revenue_90d'].fillna(0)
+
+        # Calculate detailed metadata quality score (0-100)
+        metadata_score = 100
+        if 'Title' in analysis_df.columns:
+            metadata_score -= (analysis_df['Title'].str.len() < 10) * 25  # -25 for very short titles
+        if 'ISBN' in analysis_df.columns:
+            metadata_score -= analysis_df['ISBN'].isna() * 25  # -25 for missing ISBN
+        if 'Has_Image' in analysis_df.columns:
+            metadata_score -= (~analysis_df['Has_Image']) * 25  # -25 for missing image
+        if 'Price' in analysis_df.columns:
+            metadata_score -= (analysis_df['Price'] < 2.0) * 25  # -25 for very low price
+        analysis_df['Metadata_Quality_Score'] = metadata_score
+
         # Select and rename columns for final output
-        result_df = analysis_df[['SKU', 'Title', 'Sales_Last_30d', 'Days_Since_Last_Sale', 'Flag', 'Notes']]
-        result_df = result_df.rename(columns={'Sales_Last_30d': 'Sales Last 30d', 'Days_Since_Last_Sale': 'Days Since Last Sale'})
+        columns = ['SKU', 'Title', 'ISBN', 'Price', 'Has_Image', 'quantity',
+                  'Sales Last 30d', 'Sales Last 90d',
+                  'Days Since Last Sale', 'Is_Stale', 'Bad_Metadata',
+                  'Metadata_Quality_Score', 'Flag', 'Notes']
+        
+        if 'Revenue_30d' in analysis_df.columns:
+            columns.extend(['Revenue_30d', 'Revenue_90d'])
+
+        result_df = analysis_df.rename(columns={
+            'Sales_Last_30d': 'Sales Last 30d',
+            'Sales_Last_90d': 'Sales Last 90d',
+            'Days_Since_Last_Sale': 'Days Since Last Sale',
+            'Revenue_30d': 'Revenue Last 30d',
+            'Revenue_90d': 'Revenue Last 90d'
+        })
+        
+        # Keep only the columns that exist
+        result_df = result_df[[col for col in columns if col in result_df.columns]]
         
         return result_df
 
@@ -208,23 +280,27 @@ class InventoryAnalyzer:
         # Add sales aggregates
         sales_last_30d = self.sales_data[
             self.sales_data['Date'] >= now - pd.Timedelta(days=30)
-        ].groupby('SKU')['Quantity'].sum().reset_index()
-        sales_last_30d.rename(columns={'Quantity': 'Sales_Last_30d'}, inplace=True)
+        ].groupby('SKU')['quantity'].sum().reset_index()
+        sales_last_30d.rename(columns={'quantity': 'Sales_Last_30d'}, inplace=True)
         
         sales_last_90d = self.sales_data[
             self.sales_data['Date'] >= now - pd.Timedelta(days=90)
-        ].groupby('SKU')['Quantity'].sum().reset_index()
-        sales_last_90d.rename(columns={'Quantity': 'Sales_Last_90d'}, inplace=True)
+        ].groupby('SKU')['quantity'].sum().reset_index()
+        sales_last_90d.rename(columns={'quantity': 'Sales_Last_90d'}, inplace=True)
         
         # Calculate days since last sale
+        # Ensure Date column is datetime
+        if not pd.api.types.is_datetime64_any_dtype(self.sales_data['Date']):
+            self.sales_data['Date'] = pd.to_datetime(self.sales_data['Date'])
+            
+        # Get last sale dates
         last_sale_dates = self.sales_data.groupby('SKU')['Date'].max().reset_index()
         
-        # Calculate days since last sale for each SKU
-        days_since = []
-        for date in last_sale_dates['Date']:
-            days_since.append((now - date).days)
+        # Calculate days since last sale using apply
+        def calc_days_since(row):
+            return (now - row['Date']).days
         
-        last_sale_dates['Days_Since_Last_Sale'] = days_since
+        last_sale_dates['Days_Since_Last_Sale'] = last_sale_dates.apply(calc_days_since, axis=1)
         
         # Merge sales data with inventory
         features = features.merge(sales_last_30d, on='SKU', how='left')
@@ -271,28 +347,35 @@ class InventoryAnalyzer:
         descriptions = {}
         
         # Get cluster statistics
-        cluster_stats = clustered_data.groupby('Cluster').agg({
+        stats_columns = {
             'Price': 'mean',
-            'Sales_Last_30d': 'mean',
-            'Days_Since_Last_Sale': 'mean',
+            'Sales Last 30d': 'mean',
+            'Days Since Last Sale': 'mean',
             'Has_Image': 'mean',
             'Has_ISBN': 'mean',
             'SKU': 'count'
-        }).reset_index()
+        }
+        
+        # Only include columns that exist
+        available_columns = {col: stats_columns[col] for col in stats_columns if col in clustered_data.columns}
+        cluster_stats = clustered_data.groupby('Cluster').agg(available_columns).reset_index()
         
         # Generate descriptions
         for _, row in cluster_stats.iterrows():
             cluster_id = row['Cluster']
             count = row['SKU']
             
-            if row['Sales_Last_30d'] > 5 and row['Days_Since_Last_Sale'] < 30:
-                category = "High Performers"
-            elif row['Sales_Last_30d'] < 1 and row['Days_Since_Last_Sale'] > 90:
-                category = "Stale Inventory"
-            elif row['Has_Image'] < 0.5 or row['Has_ISBN'] < 0.5:
-                category = "Poor Metadata"
-            else:
-                category = "Average Performers"
+            # Default category
+            category = "Average Performers"
+            
+            # Update category based on available metrics
+            if 'Sales Last 30d' in row and 'Days Since Last Sale' in row:
+                if row['Sales Last 30d'] > 5 and row['Days Since Last Sale'] < 30:
+                    category = "High Performers"
+                elif row['Sales Last 30d'] < 1 and row['Days Since Last Sale'] > 90:
+                    category = "Stale Inventory"
+                elif ('Has_Image' in row and row['Has_Image'] < 0.5) or ('Has_ISBN' in row and row['Has_ISBN'] < 0.5):
+                    category = "Poor Metadata"
             
             descriptions[cluster_id] = f"{category} (n={count})"
         

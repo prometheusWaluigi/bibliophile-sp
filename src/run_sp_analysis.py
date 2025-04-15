@@ -12,8 +12,8 @@ import logging
 import sys
 from pathlib import Path
 
-from .sp_data_analysis import run_sp_data_analysis
-from .oneapi_accelerator import ONEAPI_AVAILABLE
+from src.sp_data_analysis import run_sp_data_analysis
+from src.oneapi_accelerator import ONEAPI_AVAILABLE
 
 # Set up logging
 logging.basicConfig(

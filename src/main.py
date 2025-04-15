@@ -113,11 +113,62 @@ def run_inventory_analysis(use_spapi=False, use_acceleration=True):
         if ONEAPI_AVAILABLE and use_acceleration:
             disable_acceleration()
     
-    # Save the results to a CSV file
-    output_path = "output/inventory_analysis.csv"
-    results_df.to_csv(output_path, index=False)
+    # Create timestamped output directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = f"output/analysis_{timestamp}"
+    os.makedirs(output_dir, exist_ok=True)
     
-    print(f"✅ Analysis complete. Results written to {output_path}")
+    # Save the main analysis results
+    main_output = f"{output_dir}/inventory_analysis.csv"
+    results_df.to_csv(main_output, index=False)
+    
+    # Save detailed analysis files
+    if isinstance(results_df, pd.DataFrame):
+        # Save stale items report
+        stale_items = results_df[results_df['Is_Stale']].copy()
+        stale_items.to_csv(f"{output_dir}/stale_items.csv", index=False)
+        
+        # Save items with bad metadata
+        bad_metadata = results_df[results_df['Bad_Metadata']].copy()
+        bad_metadata.to_csv(f"{output_dir}/bad_metadata.csv", index=False)
+        
+        # Save high performers (good sellers)
+        good_sellers = results_df[
+            (~results_df['Is_Stale']) & 
+            (~results_df['Bad_Metadata'])
+        ].copy()
+        good_sellers.to_csv(f"{output_dir}/good_sellers.csv", index=False)
+        
+        # Save sales velocity report
+        sales_velocity = results_df[['SKU', 'Title', 'Sales Last 30d', 'Sales Last 90d', 'Days Since Last Sale']].copy()
+        sales_velocity = sales_velocity.sort_values('Sales Last 90d', ascending=False)
+        sales_velocity.to_csv(f"{output_dir}/sales_velocity.csv", index=False)
+        
+        # Save metadata quality report
+        if 'Metadata_Quality_Score' in results_df.columns:
+            metadata_quality = results_df[['SKU', 'Title', 'ISBN', 'Has_Image', 'Metadata_Quality_Score']].copy()
+            metadata_quality = metadata_quality.sort_values('Metadata_Quality_Score', ascending=False)
+            metadata_quality.to_csv(f"{output_dir}/metadata_quality.csv", index=False)
+        
+        # Save revenue analysis if available
+        if 'Revenue Last 30d' in results_df.columns:
+            revenue_analysis = results_df[
+                ['SKU', 'Title', 'Revenue Last 30d', 'Revenue Last 90d', 'Sales Last 30d', 'Sales Last 90d']
+            ].copy()
+            revenue_analysis = revenue_analysis.sort_values('Revenue Last 90d', ascending=False)
+            revenue_analysis.to_csv(f"{output_dir}/revenue_analysis.csv", index=False)
+    
+    print(f"\n✅ Analysis complete. Results written to {output_dir}/")
+    print("\nDetailed reports generated:")
+    print(f"📊 Main Analysis: {main_output}")
+    print(f"⚠️ Stale Items: {output_dir}/stale_items.csv")
+    print(f"🔍 Bad Metadata: {output_dir}/bad_metadata.csv")
+    print(f"✨ Good Sellers: {output_dir}/good_sellers.csv")
+    print(f"📈 Sales Velocity: {output_dir}/sales_velocity.csv")
+    if 'Metadata_Quality_Score' in results_df.columns:
+        print(f"📝 Metadata Quality: {output_dir}/metadata_quality.csv")
+    if 'Revenue Last 30d' in results_df.columns:
+        print(f"💰 Revenue Analysis: {output_dir}/revenue_analysis.csv")
     
     # Display a summary of the results
     stale_count = results_df[results_df['Flag'] == '⚠️'].shape[0]
